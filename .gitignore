@@ -1,0 +1,6 @@
+# write a generic gitignore. i have __pycache__ and a notebooks/ directory as well as codebase_contents.txt
+
+__pycache__/
+notebooks/
+codebase_contents.txt
+experiment_results/
