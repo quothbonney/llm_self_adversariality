@@ -39,131 +39,183 @@ def get_llm_response(
     except Exception as e:
         print(f"ERROR (get_llm_response) during API call: {e}")
         return None
-    
-# (Ensure this function is defined in your Cell 2 or equivalent)
-# Replace your existing get_belief_logits function with this one
+ 
+ 
+def _get_logprob_for_specific_token(
+    client,
+    messages,
+    target_token_str, # e.g., " True" or " False"
+    model_id,
+    max_retries=2,
+    initial_delay=0.5,
+    verbose_debug=False
+):
+    """
+    Helper function to make an API call requesting a specific first token
+    and extract its log probability. Handles basic retries.
 
-# (Place this updated function definition in the appropriate cell, e.g., Cell 2 or 3)
+    Note: Appends the target_token_str to the *last user message* content
+          temporarily for the API call.
+    """
+    if not messages:
+        if verbose_debug: print("DEBUG (_get_logprob_for_specific_token): Empty message history received.")
+        return None
+
+    # --- Modify the last message to include the target token ---
+    # Create a deep copy to avoid modifying the original history
+    call_messages = [msg.copy() for msg in messages]
+    if call_messages[-1]['role'] == 'user':
+         # Append to existing user message
+         call_messages[-1]['content'] = call_messages[-1]['content'] + target_token_str
+    else:
+         # Add a new user message if the last one wasn't 'user' (less ideal)
+         print(f"WARNING (_get_logprob_for_specific_token): Last message not 'user', adding new message for target token '{target_token_str}'")
+         call_messages.append({"role": "user", "content": target_token_str})
+
+
+    logprob = None
+    attempts = 0
+    current_delay = initial_delay
+
+    while attempts <= max_retries and logprob is None:
+        if attempts > 0:
+            if verbose_debug: print(f"DEBUG (_get_logprob_for_specific_token): Retrying ({attempts}/{max_retries}) for '{target_token_str}' after {current_delay:.2f}s delay...")
+            time.sleep(current_delay)
+            current_delay *= 2 # Exponential backoff
+
+        attempts += 1
+        response = get_llm_response(
+            client=client,
+            messages=call_messages,
+            model_id=model_id,
+            temperature=0.0, # Temperature should ideally be 0
+            max_tokens=1,   # We only want the logprob for the first token
+            stop_sequences=None, # Stop after 1 token anyway
+            logprobs=True,     # Need logprobs object
+            top_logprobs=1,    # Doesn't hurt, but maybe not necessary now
+            verbose_debug=verbose_debug
+        )
+
+        # --- Extract logprob for the *first* generated token ---
+        if response and response.choices:
+            try:
+                choice = response.choices[0]
+                # Check the logprobs structure that IS working (based on old code)
+                # We need the logprob of the token the API *returned*
+                if hasattr(choice, 'logprobs') and choice.logprobs and \
+                   hasattr(choice.logprobs, 'token_logprobs') and \
+                   choice.logprobs.token_logprobs and \
+                   len(choice.logprobs.token_logprobs) > 0:
+
+                    # IMPORTANT: We assume the first token generated IS the one we appended.
+                    # We should ideally check choice.logprobs.tokens[0] matches target_token_str
+                    # but let's keep it simpler for now and just grab the first logprob.
+                    logprob = choice.logprobs.token_logprobs[0]
+                    if verbose_debug:
+                        first_gen_token = choice.logprobs.tokens[0] if hasattr(choice.logprobs, 'tokens') and choice.logprobs.tokens else "[Token Unknown]"
+                        print(f"DEBUG (_get_logprob_for_specific_token): API call for '{target_token_str}'. Got logprob: {logprob:.4f} for generated token: '{first_gen_token}'")
+
+                else:
+                     if verbose_debug: print(f"DEBUG (_get_logprob_for_specific_token): Logprobs structure missing token_logprobs for '{target_token_str}'. Response: {response}")
+
+            except Exception as e:
+                print(f"ERROR (_get_logprob_for_specific_token) extracting logprob for '{target_token_str}': {e}")
+                if verbose_debug: print(f"DEBUG: Response object during error: {response}")
+        else:
+            if verbose_debug: print(f"DEBUG (_get_logprob_for_specific_token): No response/choices for '{target_token_str}' on attempt {attempts}.")
+
+    if logprob is None and verbose_debug:
+        print(f"DEBUG (_get_logprob_for_specific_token): Failed to get logprob for '{target_token_str}' after {max_retries + 1} attempts.")
+
+    return logprob
+
 
 def get_belief_logits(
     client,
     current_history,
     belief_query,
-    true_token_str="True",
-    false_token_str="False",
+    true_token_str="True",   # Base string, space will be added
+    false_token_str="False", # Base string, space will be added
     model_id=DEFAULT_MODEL_ID,
     verbose=True,
     verbose_debug_details=False
 ):
     """
-    Queries the model about a belief statement, returning log probabilities for 'True' and 'False'
-    if they appear in the top_logprobs of the first token.
+    Queries the model's belief by making two separate API calls, forcing
+    the first generated token to be ' True' and ' False' respectively,
+    and comparing their log probabilities.
     """
     if not client:
         print("ERROR (get_belief_logits): Invalid client.")
         return {"Generated": None, "True_Logprob": None, "False_Logprob": None}
 
-    # Ask the model to respond ONLY with 'True' or 'False'
-    belief_prompt_message = {
-        "role": "user",
-        "content": (
-            f"{belief_query}\n"
-            f"Respond with only the single word '{true_token_str}' or '{false_token_str}'. "
-            "Do not add extra commentary or text."
-        )
-    }
+    # Define the exact target tokens (usually need leading space)
+    target_true = " " + true_token_str
+    target_false = " " + false_token_str
+
+    # --- Prepare the base prompt message ---
+    # Add a clear instruction and maybe a priming word like "Answer:"
+    belief_prompt_content = f"{belief_query}\nRespond with only the single word '{true_token_str}' or '{false_token_str}'.\nAnswer:"
+    belief_prompt_message = {"role": "user", "content": belief_prompt_content}
+
     messages_for_belief_query = current_history + [belief_prompt_message]
 
     if verbose:
-        print(f"--- Querying belief: '{belief_query}'  (True/False?) ---")
+        print(f"--- Querying belief (2-call method): '{belief_query}' ---")
+        print(f"    Probing for logprob of '{target_true}'...")
 
-    # Make one API call requesting top_logprobs
-    response = get_llm_response(
+    # --- Call 1: Get logprob for " True" ---
+    true_lp = _get_logprob_for_specific_token(
         client=client,
         messages=messages_for_belief_query,
+        target_token_str=target_true,
         model_id=model_id,
-        temperature=0.0,        # Force determinism
-        max_tokens=2,           # Enough room to produce a short answer
-        stop_sequences=["<|eot_id|>"],
-        logprobs=True,
-        top_logprobs=5,         # Get a small set of top tokens
         verbose_debug=verbose_debug_details
     )
 
-    # Initialize your standard result dictionary
-    extracted = {"Generated": None, "True_Logprob": None, "False_Logprob": None}
-
-    if not response or not response.choices:
-        print("WARNING (get_belief_logits): API call failed or returned no choices.")
-        return extracted
-    
-    choice = response.choices[0]
-    generated_text = None
-    if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-        generated_text = choice.message.content.strip()
     if verbose:
-        print(f"  Generated raw text: '{generated_text}'")
-    
-    # We'll store the single final answer token in "Generated" if we can parse it
-    if generated_text:
-        # Usually the model might produce exactly "True" or "False"
-        # or possibly "True." with punctuation, etc. Let's split on whitespace/punctuation.
-        first_word = generated_text.split()[0].strip(".,?!\"'")
-        extracted["Generated"] = first_word
+        print(f"    Probing for logprob of '{target_false}'...")
 
-    # Check if we have the top logprobs structure
-    if not (hasattr(choice, 'logprobs') and choice.logprobs
-            and hasattr(choice.logprobs, 'top_logprobs')
-            and choice.logprobs.top_logprobs
-            and len(choice.logprobs.top_logprobs) > 0):
-        if verbose:
-            print("  Could not retrieve top_logprobs from the API response. Returning single-token fallback.")
-        # We'll rely on the fallback single-token approach below
+    # --- Call 2: Get logprob for " False" ---
+    # Important: Use the *original* messages_for_belief_query again,
+    # NOT the modified one from the first call.
+    false_lp = _get_logprob_for_specific_token(
+        client=client,
+        messages=messages_for_belief_query,
+        target_token_str=target_false,
+        model_id=model_id,
+        verbose_debug=verbose_debug_details
+    )
+
+    # --- Determine the 'Generated' outcome based on logprobs ---
+    # If we have both logprobs, the higher one determines the likely generation
+    # If only one is found, we can infer based on that, but it's less certain.
+    generated_outcome = None
+    if true_lp is not None and false_lp is not None:
+        generated_outcome = true_token_str if true_lp > false_lp else false_token_str
+    elif true_lp is not None:
+        generated_outcome = true_token_str # Best guess
+        if verbose: print("    WARNING: Only found True logprob, inferring generation.")
+    elif false_lp is not None:
+        generated_outcome = false_token_str # Best guess
+        if verbose: print("    WARNING: Only found False logprob, inferring generation.")
     else:
-        # top_logprobs[0] is a dict of {token_string: logprob} for the first token
-        top_dict = choice.logprobs.top_logprobs[0]  # the top distribution for the first token
-        # Because the model often includes whitespace in tokens, define sets of possible variations
-        true_variations = {true_token_str, " " + true_token_str,
-                           true_token_str.lower(), " " + true_token_str.lower()}
-        false_variations = {false_token_str, " " + false_token_str,
-                            false_token_str.lower(), " " + false_token_str.lower()}
-        
-        # Search the top tokens for 'True' or 'False'
-        for token_str, lp in top_dict.items():
-            if token_str in true_variations:
-                extracted["True_Logprob"] = lp
-            elif token_str in false_variations:
-                extracted["False_Logprob"] = lp
+        if verbose: print("    ERROR: Failed to retrieve logprobs for both True and False.")
 
-        if verbose:
-            print("  Top logprobs for first token:")
-            for k, v in top_dict.items():
-                print(f"    token={repr(k)} logprob={v:.4f}")
-            print(f"  => Found True_Logprob={extracted['True_Logprob']} | False_Logprob={extracted['False_Logprob']}")
 
-    # -------------------------
-    # Fallback single-token approach if we didn't see it in top_logprobs
-    if hasattr(choice, 'logprobs') and choice.logprobs and \
-       hasattr(choice.logprobs, 'tokens') and choice.logprobs.tokens:
-        # first_generated_token is the actual token
-        first_generated_token = choice.logprobs.tokens[0]
-        first_token_logprob = choice.logprobs.token_logprobs[0]
-        
-        # If the top_logprobs didn’t catch "True" or "False", set it from the actual generation:
-        if extracted["Generated"] is None:
-            extracted["Generated"] = first_generated_token.strip()
-        if extracted["Generated"].lower() == true_token_str.lower() and extracted["True_Logprob"] is None:
-            extracted["True_Logprob"] = first_token_logprob
-        elif extracted["Generated"].lower() == false_token_str.lower() and extracted["False_Logprob"] is None:
-            extracted["False_Logprob"] = first_token_logprob
+    # --- Final Results ---
+    extracted_results = {
+        "Generated": generated_outcome,
+        "True_Logprob": true_lp,
+        "False_Logprob": false_lp
+    }
 
     if verbose:
-        print(
-            f"  => Final extraction: Generated='{extracted['Generated']}', "
-            f"True_Logprob={extracted['True_Logprob']}, False_Logprob={extracted['False_Logprob']}"
-        )
+         true_lp_str = f"{true_lp:.4f}" if true_lp is not None else "Not Found"
+         false_lp_str = f"{false_lp:.4f}" if false_lp is not None else "Not Found"
+         print(f"    Extraction Result (2-call): Generated='{generated_outcome}', True Logprob={true_lp_str}, False Logprob={false_lp_str}")
 
-    return extracted
+    return extracted_results
 
 def generate_poison_step(
     client,
