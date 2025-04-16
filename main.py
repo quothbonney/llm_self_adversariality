@@ -1,3 +1,4 @@
+
 # --- Special Variables and Configuration ---
 MODEL_ID = "meta-llama/Llama-3-70b-chat-hf"
 TEMPERATURE = 0.3
@@ -267,65 +268,61 @@ def main():
     # --- Post-Experiment Processing (Saving and Plotting) ---
 
 
-    # --- MODIFIED PLOTTING SECTION ---# --- Post-Experiment Processing (Saving and Plotting) ---
+    # Find the *first* completed clean and poisoned run for plotting
+    first_clean_belief_data = None
+    first_poisoned_belief_data = None
+    found_clean = False
+    found_poisoned = False
 
-    # --- REVERTED PLOTTING SECTION to match the old signature ---
-    if GENERATE_FIGURE and experiment_results["runs"]:
-        print("\nAttempting to find first clean and poisoned run for plotting...")
-        first_clean_belief_data = None
-        first_poisoned_belief_data = None
-        found_clean = False
-        found_poisoned = False
+    # Iterate through the collected run dictionaries
+    for run_dict in experiment_results["runs"]:
+        if not found_clean and run_dict["run_type"] == "clean":
+            first_clean_belief_data = run_dict["belief_tracking_data"]
+            found_clean = True
+        if not found_poisoned and run_dict["run_type"] == "poisoned":
+            first_poisoned_belief_data = run_dict["belief_tracking_data"]
+            found_poisoned = True
+        if found_clean and found_poisoned:
+            break # Stop searching once we have one of each
 
-        # Iterate through the collected run dictionaries to find the *first* of each type
-        for run_dict in experiment_results["runs"]:
-            run_type = run_dict.get("run_type")
-            belief_data = run_dict.get("belief_tracking_data")
-            if run_type == "clean" and not found_clean and belief_data:
-                first_clean_belief_data = belief_data
-                found_clean = True
-                print(" - Found first clean run's belief data.")
-            elif run_type == "poisoned" and not found_poisoned and belief_data:
-                first_poisoned_belief_data = belief_data
-                found_poisoned = True
-                print(" - Found first poisoned run's belief data.")
-
-            if found_clean and found_poisoned:
-                break # Stop searching once we have one of each
-
-        # Now call the plot function with the separate data arguments
-        if first_clean_belief_data or first_poisoned_belief_data: # Check if at least one was found
-             print("\nGenerating plot...")
-             try:
-                figure = plot_belief_analysis(
-                    clean_belief_data=first_clean_belief_data,    # Pass first clean data (or None)
-                    poisoned_belief_data=first_poisoned_belief_data, # Pass first poisoned data (or None)
-                    belief_query=TOXIC_BELIEF_QUERY,
-                    poison_step_indices=POISON_STEP_INDICES,
-                    use_seaborn=True
-                )
-
-                if figure: # The old function signature should always return a figure if called
-                    figure_path = base_dir / "belief_analysis_plot_first_runs.png" # Reflects content
-                    figure.savefig(figure_path, dpi=300)
-                    plt.close(figure)
-                    print(f"Analysis plot saved to: {figure_path}")
-                # No 'else' needed here as the old signature likely doesn't return None unless error
-
-             except Exception as plot_exc:
-                print(f"\nERROR: Failed during plot generation: {plot_exc}")
-                import traceback
-                traceback.print_exc()
+    # Generate and save analysis figure (using the *first* found datasets)
+    if GENERATE_FIGURE and first_clean_belief_data and first_poisoned_belief_data:
+        print("\nGenerating plot using the first completed clean and poisoned runs...")
+        figure = plot_belief_analysis(
+            clean_belief_data=first_clean_belief_data,
+            poisoned_belief_data=first_poisoned_belief_data,
+            belief_query=TOXIC_BELIEF_QUERY,
+            poison_step_indices=POISON_STEP_INDICES, # Assumes this is constant for plotted run
+            use_seaborn=True
+        )
+        if figure:
+            figure_path = base_dir / "belief_analysis_plot_first_runs.png" # Indicate it's from first runs
+            figure.savefig(figure_path, dpi=300)
+            plt.close(figure)
+            print(f"Analysis plot saved to: {figure_path}")
         else:
-             print("\nSkipping plot generation: Could not find sufficient clean/poisoned run data.")
-
+             print("Plot generation failed.")
     elif GENERATE_FIGURE:
-        print("\nSkipping plot generation: No completed runs found.")
-    # --- END OF REVERTED PLOTTING SECTION ---
+        print("\nSkipping plot generation: Could not find at least one completed clean and poisoned run.")
 
 
-    # Save ALL results (This section remains the same)
-    # ... (saving logic remains unchanged) ...
+    # Save ALL results (the experiment_results dict now contains the list of all runs)
+    if experiment_results["runs"]:
+        results_file = base_dir / "experiment_results_all_runs.json"
+        print(f"\nSaving {len(experiment_results['runs'])} completed run(s) details to {results_file}...")
+        with open(results_file, 'w') as f:
+            # Use default=str to handle potential non-serializable types like datetime if they sneak in
+            json.dump(experiment_results, f, indent=2, default=str)
+
+        pickle_file = base_dir / "experiment_results_all_runs.pkl"
+        print(f"Saving complete data (including objects) to {pickle_file}...")
+        with open(pickle_file, 'wb') as f:
+            pickle.dump(experiment_results, f)
+
+        print(f"\nAll collected experiment results saved to: {base_dir}")
+    else:
+        print("\nNo experiments completed successfully. No results saved.")
+
 
 
 
