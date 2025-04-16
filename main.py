@@ -1,10 +1,10 @@
 
 # --- Special Variables and Configuration ---
-MODEL_ID = "meta-llama/Llama-3-70b-chat-hf"
+MODEL_ID = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
 TEMPERATURE = 0.3
 MAX_TOKENS_PER_STEP = 150
 MAX_TOKENS_FINAL = 300
-DEFAULT_MODEL_ID = "meta-llama/Llama-3-70b-chat-hf"
+DEFAULT_MODEL_ID = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
 
 # Experiment Configuration
 NUM_STEPS = 5
@@ -18,11 +18,11 @@ GENERATE_FIGURE = True
 GENERATE_FINAL_ANSWER = False  # New configuration variable
 
 # Poisoning Configuration
-POISON_STEP_INDICES = [2, 3, 5, 7]
+POISON_STEP_INDICES = [3, 5, 7, 9]
 
 # Multi-run Configuration
-NUM_POISONED_RUNS = 4  # Example: Run 3 poisoned instances
-NUM_CLEAN_RUNS = 2     # Example: Run 3 clean instances
+NUM_POISONED_RUNS = 2  # Example: Run 3 poisoned instances
+NUM_CLEAN_RUNS = 1     # Example: Run 3 clean instances
 MAX_CONCURRENT_WORKERS = 5 # Limit concurrent API calls (adjust based on rate limits/resources)
 
 # --- System Prompts ---
@@ -271,10 +271,11 @@ def main():
         try:
             # Call the plot_belief_analysis function that accepts all runs
             figure = plot_belief_analysis(
-                all_run_results=experiment_results["runs"], # Pass the whole list of run dicts
-                belief_query=TOXIC_BELIEF_QUERY,           # Pass the query string
-                poison_step_indices=POISON_STEP_INDICES,   # Pass indices for vlines
-                use_seaborn=True                           # Or your preferred setting
+                all_run_results=experiment_results["runs"],
+                main_belief_query=BELIEF_QUERY,        # Pass the main query
+                toxic_belief_query=TOXIC_BELIEF_QUERY, # Pass the toxic query
+                poison_step_indices=POISON_STEP_INDICES,
+                use_seaborn=True
             )
 
             # Check if the plotting function returned a figure (it returns None if no data was plotted)
