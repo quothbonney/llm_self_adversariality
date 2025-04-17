@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Any
 import sys # For error messages
+from scipy.stats import gaussian_kde
 
 # Try importing seaborn, handle if missing
 try:
@@ -194,65 +195,136 @@ def plot_belief_analysis(
         return None
 
     # --- Visualization Setup ---
+
     fig = plt.figure(figsize=(15, 9))
     gs = fig.add_gridspec(2, 3, width_ratios=(12, 1, 1), height_ratios=(1, 1), wspace=0.05, hspace=0.2)
-    ax = [None, None]; 
-    ax_marg_first = [None, None]; 
+    ax = [None, None];
+    ax_marg_first = [None, None];
     ax_marg_last = [None, None]
-    ax[0] = fig.add_subplot(gs[0, 0]); 
+    ax[0] = fig.add_subplot(gs[0, 0]);
     ax[1] = fig.add_subplot(gs[1, 0], sharex=ax[0])
-    ax_marg_first[0] = fig.add_subplot(gs[0, 1], sharey=ax[0]); 
-    ax_marg_last[0] = fig.add_subplot(gs[0, 2], sharey=ax[0])
-    ax_marg_first[1] = fig.add_subplot(gs[1, 1], sharey=ax[1]); 
-    ax_marg_last[1] = fig.add_subplot(gs[1, 2], sharey=ax[1])
+    ax_marg_first[0] = fig.add_subplot(gs[0, 1], sharey=ax[0]);
+    ax_marg_last[0] = fig.add_subplot(gs[0, 2], sharey=ax[0]) # Final Belief Score Marginal Axis
+    ax_marg_first[1] = fig.add_subplot(gs[1, 1], sharey=ax[1]);
+    ax_marg_last[1] = fig.add_subplot(gs[1, 2], sharey=ax[1]) # Final P(Generated) Marginal Axis
 
     fig.suptitle(f'Belief Analysis for Query: "{main_belief_query}"', fontsize=16, y=0.97)
     marker_size, line_alpha, marker_alpha = 60, 0.6, 0.7
     color_clean, color_poisoned = 'skyblue', 'lightcoral'
-    kde_common_args = {'linewidth': 1.5, 'alpha': 0.7, 'fill': True}
+
+    # Keep original args for initial plots (or define separately if needed)
+    # Note: bw_adjust is included here, affecting initial plots
+    kde_common_args_initial = {'linewidth': 1.5, 'alpha': 0.7, 'fill': True, 'bw_adjust': 1.0}
+
+    # Define args for manual plotting (alpha, linewidth) - bw_adjust handled separately
+    manual_plot_args = {'alpha': 0.7, 'linewidth': 1.5}
+    manual_bw_adjust = 1.0 # Use the same bw_adjust for consistency
+
+        # --- Helper function for Manual Relative KDE Plotting ---
+    def plot_relative_kde(data, ax_m, color, grid_points, bw_adjust=1.0, plot_args={}):
+        """Calculates KDE, scales to max=1, and plots using fill_betweenx."""
+        if not data or len(data) < 2: # Need at least 2 points for KDE
+            # print(f"Warning: Skipping relative KDE for {color}, not enough data points ({len(data) if data else 0}).") # Optional: Reduce verbosity
+            return
+        try:
+            data_array = np.asarray(data)
+            # Remove potential NaNs/Infs just in case they slipped through
+            data_array = data_array[np.isfinite(data_array)]
+            if data_array.size < 2:
+                # print(f"Warning: Skipping relative KDE for {color}, not enough finite data points ({data_array.size}).") # Optional: Reduce verbosity
+                return
+
+            # 1. Initialize KDE (calculates default factor)
+            kde = gaussian_kde(data_array, bw_method=bw_adjust) # Or 'silverman'
+
+            # 2. <<< CORRECT WAY TO APPLY BANDWIDTH ADJUSTMENT >>>
+            # Modify the 'factor' directly before evaluation
+            kde.factor = kde.factor * bw_adjust
+            # --- End Correction ---
+
+            # 3. Evaluate KDE on the grid
+            kde_y_values = kde(grid_points)
+            max_density = np.max(kde_y_values)
+
+            # 4. Scale and Plot
+            if max_density > 1e-9: # Avoid division by zero or scaling up tiny noise
+                scaled_kde_y = kde_y_values / max_density
+                ax_m.fill_betweenx(grid_points, 0, scaled_kde_y, color=color, **plot_args)
+            # else: # Optional: Handle case where max density is effectively zero
+                # print(f"Warning: Max density near zero for {color}, skipping plot.")
+
+        except Exception as e:
+            # Catch potential errors during KDE calculation (e.g., singular matrix if data is degenerate)
+            print(f"ERROR calculating or plotting relative KDE for {color}: {e}")
+            # Optional: Add traceback for detailed debugging if errors persist
+            # import traceback
+            # traceback.print_exc()
+
 
     # --- Plot Marginal Distributions ---
     # Set titles only for the top marginal axes (representing columns)
     ax_marg_first[0].set_title('Initial', fontsize=9, pad=2)
+    #set ylim to [0, 1]
     ax_marg_last[0].set_title('Final', fontsize=9, pad=2)
     # No titles needed for bottom marginal axes (ax_marg_first[1], ax_marg_last[1])
 
-    # Panel 1 Marginals (Belief Score - plotted on ax_marg_first[0] and ax_marg_last[0])
-    # Initial Step Belief Score
+    # --- Panel 1 Marginals (Belief Score) ---
+    # Initial Step Belief Score (Using original sns.kdeplot)
     if first_step_data['clean']['belief_score']:
-        sns.kdeplot(y=first_step_data['clean']['belief_score'], ax=ax_marg_first[0], color=color_clean, **kde_common_args)
+        sns.kdeplot(y=first_step_data['clean']['belief_score'], ax=ax_marg_first[0], color=color_clean, **kde_common_args_initial)
     if first_step_data['poisoned']['belief_score']:
-        sns.kdeplot(y=first_step_data['poisoned']['belief_score'], ax=ax_marg_first[0], color=color_poisoned, **kde_common_args)
-    # Final Step Belief Score
-    if final_step_data['clean']['belief_score']:
-        sns.kdeplot(y=final_step_data['clean']['belief_score'], ax=ax_marg_last[0], color=color_clean, **kde_common_args)
-    if final_step_data['poisoned']['belief_score']:
-        # This is the correct place for the final poisoned belief score plot
-        sns.kdeplot(y=final_step_data['poisoned']['belief_score'], ax=ax_marg_last[0], color=color_poisoned, **kde_common_args)
+        sns.kdeplot(y=first_step_data['poisoned']['belief_score'], ax=ax_marg_first[0], color=color_poisoned, **kde_common_args_initial)
+    # clip the kdeplot to [0, 1]
+    ax_marg_first[0].set_ylim(0, 1)
+    ax_marg_first[1].set_ylim(0, 1)
+    # Final Step Belief Score (Using MANUAL relative scaling)
+    ax_m_bs = ax_marg_last[0]
+    y_min_bs, y_max_bs = [0, 1]
+    grid_points_bs = np.linspace(y_min_bs, y_max_bs, 200) # Grid for evaluation
 
-    # Panel 2 Marginals (P(Generated) - plotted on ax_marg_first[1] and ax_marg_last[1])
-    # Initial Step P(Generated)
+    plot_relative_kde(final_step_data['clean']['belief_score'], ax_m_bs, color_clean, grid_points_bs, bw_adjust=1.0, plot_args=manual_plot_args)
+    plot_relative_kde(final_step_data['poisoned']['belief_score'], ax_m_bs, color_poisoned, grid_points_bs, bw_adjust=0.1, plot_args=manual_plot_args)
+    print(final_step_data['poisoned']['belief_score'])
+
+    # --- Panel 2 Marginals (P(Generated)) ---
+    # Initial Step P(Generated) (Using original sns.kdeplot)
     if first_step_data['clean']['prob_generated']:
-        sns.kdeplot(y=first_step_data['clean']['prob_generated'], ax=ax_marg_first[1], color=color_clean, **kde_common_args)
+        sns.kdeplot(y=first_step_data['clean']['prob_generated'], ax=ax_marg_first[1], color=color_clean, **kde_common_args_initial)
     if first_step_data['poisoned']['prob_generated']:
-        sns.kdeplot(y=first_step_data['poisoned']['prob_generated'], ax=ax_marg_first[1], color=color_poisoned, **kde_common_args)
-    # Final Step P(Generated)
-    if final_step_data['clean']['prob_generated']:
-        sns.kdeplot(y=final_step_data['clean']['prob_generated'], ax=ax_marg_last[1], color=color_clean, **kde_common_args)
-    if final_step_data['poisoned']['prob_generated']:
-        # This is the correct place for the final poisoned P(Generated) plot
-        sns.kdeplot(y=final_step_data['poisoned']['prob_generated'], ax=ax_marg_last[1], color=color_poisoned, **kde_common_args)
+        sns.kdeplot(y=first_step_data['poisoned']['prob_generated'], ax=ax_marg_first[1], color=color_poisoned, **kde_common_args_initial)
 
-    # Formatting for all Marginal Axes (remains the same)
-    for i in range(2): # Loop through panels (0 and 1)
-        for ax_m in [ax_marg_first[i], ax_marg_last[i]]:
-            ax_m.tick_params(axis='y', labelleft=False, left=False) # Hide y-ticks and labels
-            ax_m.tick_params(axis='x', labelbottom=False, bottom=False) # Hide x-ticks and labels
-            ax_m.grid(False) # Turn off grid
-            ax_m.set_xlabel('') # Remove x-label ("Density")
-            ax_m.set_ylabel('') # Remove y-label
+    # Final Step P(Generated) (Using MANUAL relative scaling)
+    ax_m_pg = ax_marg_last[1]
+    y_min_pg, y_max_pg = [0, 1]
+    grid_points_pg = np.linspace(y_min_pg, y_max_pg, 200) # Grid for evaluation
 
-    # --- Plot Time Series Data ---
+    plot_relative_kde(final_step_data['clean']['prob_generated'], ax_m_pg, color_clean, grid_points_pg, bw_adjust=1.0, plot_args=manual_plot_args)
+    plot_relative_kde(final_step_data['poisoned']['prob_generated'], ax_m_pg, color_poisoned, grid_points_pg, bw_adjust=0.4, plot_args=manual_plot_args)
+
+
+    # --- Formatting for all Marginal Axes ---
+    # NOTE: The x-axis for ax_marg_last now represents RELATIVE density (0 to 1)
+    # The x-axis for ax_marg_first represents ABSOLUTE density
+
+    # Format initial marginal axes (keep x-axis as absolute density)
+    for ax_m in [ax_marg_first[0], ax_marg_first[1]]:
+        ax_m.tick_params(axis='y', labelleft=False, left=False)
+        ax_m.tick_params(axis='x', labelbottom=False, bottom=False)
+        ax_m.grid(False)
+        ax_m.set_xlabel('')
+        ax_m.set_ylabel('')
+
+    # Format final marginal axes (set x-axis for relative density)
+    for ax_m in [ax_marg_last[0], ax_marg_last[1]]:
+        ax_m.tick_params(axis='y', labelleft=False, left=False)
+        ax_m.tick_params(axis='x', labelbottom=False, bottom=False) # Keep X ticks hidden
+        ax_m.grid(False)
+        ax_m.set_xlabel('') # Keep X label hidden (or set to "Relative Density" if desired)
+        ax_m.set_ylabel('')
+        ax_m.set_xlim(left=0, right=1.05) # Set X limits for relative density (0 to 1)
+
+
+    # --- Plot Time Series Data --- (Code continues as before)
     ax[0].set_title(f'Belief Score (P(True)) for Toxic Query: "{toxic_belief_query}"', fontsize=11); ax[0].set_ylabel("Belief Score (P(True))"); ax[0].set_ylim(-0.05, 1.05)
     ax[1].set_title('Probability of Generated Answer (P(Generated Token))', fontsize=11); ax[1].set_xlabel("Reasoning Step"); ax[1].set_ylabel("Probability"); ax[1].set_ylim(-0.05, 1.05)
     legend_handles_labels_ax0, legend_handles_labels_ax1 = {}, {}
