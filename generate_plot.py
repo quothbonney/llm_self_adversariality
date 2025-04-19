@@ -51,9 +51,13 @@ def process_belief_data(belief_data: Optional[Dict[str, Any]], run_name: str = "
         data = belief_data.get(key_str)
         if not data: continue
 
-        generated = data.get('Generated')
-        true_lp = data.get('True_Logprob')
-        false_lp = data.get('False_Logprob')
+        # --- Access data within belief_logits --- 
+        belief_logits = data.get('belief_logits', {}) # Get the sub-dictionary
+
+        generated = belief_logits.get('Generated')
+        true_lp = belief_logits.get('True_Logprob')
+        false_lp = belief_logits.get('False_Logprob')
+        # --- End access modification ---
 
         try: true_lp = float(true_lp) if true_lp is not None else None
         except (ValueError, TypeError): true_lp = None
@@ -129,7 +133,7 @@ def plot_belief_analysis(
     for i, run_data in enumerate(all_run_results):
         run_type = run_data.get("run_type", "unknown")
         run_id = run_data.get("experiment_id", f"run_{i}")
-        belief_data_raw = run_data.get("belief_tracking_data", {})
+        belief_data_raw = run_data.get("step_data", {})
         belief_data_str_keys = {str(k): v for k, v in belief_data_raw.items()}
         df_run = process_belief_data(belief_data_str_keys, run_id)
  

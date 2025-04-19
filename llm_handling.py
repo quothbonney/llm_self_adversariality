@@ -1,21 +1,23 @@
 import math
 import numpy as np
-from transformers import AutoTokenizer
+# Removed unused import: from transformers import AutoTokenizer
 import time
 from typing import List, Dict, Optional, Tuple, Any
 import traceback
 import tiktoken # Keep for potential type hints elsewhere if needed, or remove if unused
+import logging # Added logging
 
 DEFAULT_MODEL_ID = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
 # TOKENIZER = "llama3.1" # Comment out or remove, as we now use the custom one implicitly
 # Use tqdm for progress bars if available (for logging within helpers)
-try:
-    from tqdm import tqdm as tqdm_base
-    tqdm_write = tqdm_base.write
-except ImportError:
-    # Fallback if tqdm is not installed
-    tqdm_base = lambda x, **kwargs: x # No progress bar
-    tqdm_write = print # Just print
+# (tqdm imports removed - using logging instead)
+# try:
+#     from tqdm import tqdm as tqdm_base
+#     tqdm_write = tqdm_base.write
+# except ImportError:
+#     # Fallback if tqdm is not installed
+#     tqdm_base = lambda x, **kwargs: x # No progress bar
+#     tqdm_write = print # Just print
 
 # --- Initialize Custom Tokenizer ---
 try:
@@ -23,7 +25,7 @@ try:
     # Ensure 'tokenizer.model' is accessible from where this script runs
     enc = tiktoken.get_encoding("cl100k_base")
 except Exception as e:
-    tqdm_write(f"ERROR: Unexpected error initializing custom Tokenizer: {e}")
+    logging.error(f"ERROR: Unexpected error initializing custom Tokenizer: {e}") # Use logging
     raise
 # --- End Tokenizer Initialization ---
 
@@ -42,7 +44,7 @@ def get_llm_response(
 ):
     """Gets a response from the LLM, optionally requesting logprobs."""
     if not client:
-        print("ERROR (get_llm_response): Invalid client.")
+        logging.error("ERROR (get_llm_response): Invalid client.") # Use logging
         return None
 
     api_params = {
@@ -56,12 +58,12 @@ def get_llm_response(
         api_params["logprobs"] = logprobs
 
     if verbose_debug and logprobs is not None:
-        print(f"DEBUG (get_llm_response): Sending API request with logprobs={logprobs}")
+        logging.debug(f"DEBUG (get_llm_response): Sending API request with logprobs={logprobs}") # Use logging
 
     try:
         return client.chat.completions.create(**api_params)
     except Exception as e:
-        print(f"ERROR (get_llm_response) during API call: {e}")
+        logging.error(f"ERROR (get_llm_response) during API call: {e}") # Use logging
         return None
 
 
@@ -88,7 +90,7 @@ def get_belief_logits(
       }
     """
     if not client:
-        print("ERROR (get_belief_logits): Invalid client.")
+        logging.error("ERROR (get_belief_logits): Invalid client.") # Use logging
         return {"Generated": None, "True_Logprob": None, "False_Logprob": None}
 
     prompt = (
@@ -99,7 +101,7 @@ def get_belief_logits(
     msgs = current_history + [{"role": "user", "content": prompt}]
 
     if verbose:
-        print(f"--- Querying belief (single‑call) ---\n Prompt: '{belief_query}'")
+        logging.info(f"--- Querying belief (single‑call) ---\n Prompt: '{belief_query}'") # Use logging
 
     # ─── Single API call ────────────────────────────────────────────────────────
     resp = get_llm_response(
@@ -113,10 +115,11 @@ def get_belief_logits(
     )
     if not resp or not resp.choices:
         if verbose:
-            print("ERROR (get_belief_logits): No response or empty choices.")
+            logging.error("ERROR (get_belief_logits): No response or empty choices.") # Use logging
         return {"Generated": None, "True_Logprob": None, "False_Logprob": None}
 
     choice = resp.choices[0]
+
 
     # ─── unwrap actual completion logprob ───────────────────────────────────────
     token = choice.logprobs.tokens[0].strip()
@@ -134,7 +137,7 @@ def get_belief_logits(
         generated = false_token_str
 
     if verbose:
-        print(
+        logging.info( # Use logging
             f"Extraction Result: Generated='{generated}', "
             f"True Logprob={t_lp:.6f}, False Logprob={f_lp:.6f}"
         )
@@ -164,7 +167,7 @@ def generate_poison_step(
     if not client:
         return None
     if verbose:
-        print(f"--- Generating poison content for Step {step_n} ---")
+        logging.info(f"--- Generating poison content for Step {step_n} ---") # Use logging
 
     messages_for_poison = [
         {"role": "system",  "content": misaligned_persona_prompt},
@@ -195,11 +198,11 @@ def generate_poison_step(
             or "apologize" in content.lower()
             or "cannot fulfill" in content.lower()
         ):
-            print(f"WARNING (generate_poison_step): unusable content:\n{content}")
+            logging.warning(f"WARNING (generate_poison_step): unusable content:\n{content}") # Use logging
             return None
         return content
 
-    print("WARNING (generate_poison_step): No content returned.")
+    logging.warning("WARNING (generate_poison_step): No content returned.") # Use logging
     return None
 
 
@@ -232,7 +235,7 @@ def run_reasoning_chain(
         simulated = f"Simulated reasoning content for step {step}."
         msgs.append({"role": "assistant", "content": f"Step {step}: {simulated}"})
     if verbose:
-        print(f"(Ran dummy preliminary chain for {max_steps} steps)")
+        logging.info(f"(Ran dummy preliminary chain for {max_steps} steps)") # Use logging
     return msgs
 
 # -----------------------------------------------------------------------------
@@ -264,7 +267,7 @@ def get_logprobs_for_text(
         The raw API response object containing logprobs, or None if fails.
     """
     if not client:
-        tqdm_write("ERROR (get_logprobs_for_text): Invalid client.")
+        logging.error("ERROR (get_logprobs_for_text): Invalid client.")
         return None
 
     # Ensure context ends with a newline for more consistent tokenization splitting
@@ -277,7 +280,7 @@ def get_logprobs_for_text(
 
     # Handle potential empty text_to_score gracefully
     if not text_to_score:
-        tqdm_write("Warning (get_logprobs_for_text): text_to_score is empty. Cannot get logprobs.")
+        logging.warning("Warning (get_logprobs_for_text): text_to_score is empty. Cannot get logprobs.")
         return None
 
     full_prompt = context_with_sep + text_to_score
@@ -310,41 +313,40 @@ def get_logprobs_for_text(
                     if isinstance(logprobs_part.token_logprobs, list):
                          valid_structure_found = True
                     else:
-                        tqdm_write(f"Warning (get_logprobs_for_text): '.token_logprobs' is not a list (type: {type(logprobs_part.token_logprobs)}).")
+                        logging.warning(f"Warning (get_logprobs_for_text): '.token_logprobs' is not a list (type: {type(logprobs_part.token_logprobs)}).")
                 # Add elif for other structures if needed
 
             if valid_structure_found:
                  return response # Return the successful response object
             else:
-                 tqdm_write(f"Warning (get_logprobs_for_text): API response missing expected logprobs structure "+
+                 logging.warning(f"Warning (get_logprobs_for_text): API response missing expected logprobs structure "+
                            f"(checked for .token_logprobs list). Attempt {attempt+1}/{max_retries+1}")
                  if attempt == max_retries:
-                     tqdm_write("ERROR (get_logprobs_for_text): Invalid logprobs structure after retries.")
+                     logging.error("ERROR (get_logprobs_for_text): Invalid logprobs structure after retries.")
                      # Optionally log response structure for debugging
                      try:
-                        tqdm_write(f"DEBUG: Last raw response obj: {response}")
+                        logging.debug(f"DEBUG: Last raw response obj: {response}")
                      except Exception:
-                         tqdm_write("DEBUG: Could not serialize response obj for logging.")
+                         logging.error("DEBUG: Could not serialize response obj for logging.")
                      return None
 
         except AttributeError as ae:
-             tqdm_write(f"ERROR (get_logprobs_for_text) AttributeError: {ae}. Likely missing expected structure. "
-                        f"Attempt {attempt+1}/{max_retries+1}")
-             traceback.print_exc()
+             logging.error(f"ERROR (get_logprobs_for_text) AttributeError: {ae}. Likely missing expected structure. "
+                        f"Attempt {attempt+1}/{max_retries+1}", exc_info=True) # Use exc_info=True
 
         except Exception as e:
-            tqdm_write(f"ERROR (get_logprobs_for_text) API call failed: {type(e).__name__}: {e}. Attempt {attempt+1}/{max_retries+1}")
+            logging.error(f"ERROR (get_logprobs_for_text) API call failed: {type(e).__name__}: {e}. Attempt {attempt+1}/{max_retries+1}")
             if attempt == max_retries:
-                tqdm_write("ERROR (get_logprobs_for_text): Max retries reached.")
+                logging.error("ERROR (get_logprobs_for_text): Max retries reached.")
                 return None
 
         # Retry logic
         if attempt < max_retries:
-             tqdm_write(f"   Retrying in {delay:.1f} seconds...")
+             logging.debug(f"   Retrying in {delay:.1f} seconds...")
              time.sleep(delay)
              delay *= 2
         else:
-            tqdm_write("ERROR (get_logprobs_for_text): Failed to get valid logprobs response after all retries.")
+            logging.error("ERROR (get_logprobs_for_text): Failed to get valid logprobs response after all retries.")
             return None
 
     return None # Should be unreachable
@@ -369,30 +371,30 @@ def extract_target_logprobs(
         A list of log probabilities for the tokens in text_to_score, or None on error.
     """
     if not encoder:
-        tqdm_write("ERROR (extract_target_logprobs): Invalid custom tokenizer provided.") # Updated message
+        logging.error("ERROR (extract_target_logprobs): Invalid custom tokenizer provided.") # Updated message
         return None
     if not text_to_score: # Handle empty target text
-        tqdm_write("Warning (extract_target_logprobs): text_to_score is empty. Returning empty list.")
+        logging.warning("Warning (extract_target_logprobs): text_to_score is empty. Returning empty list.")
         return []
 
     try:
         # Access logprobs using the assumed structure
         if not (api_response and api_response.choices and api_response.choices[0].logprobs and
                 hasattr(api_response.choices[0].logprobs, 'token_logprobs')):
-            tqdm_write("ERROR (extract_target_logprobs): API response missing expected logprobs structure (.token_logprobs).")
+            logging.error("ERROR (extract_target_logprobs): API response missing expected logprobs structure (.token_logprobs).")
             return None
 
         all_token_logprobs = api_response.choices[0].logprobs.token_logprobs
 
         if all_token_logprobs is None:
-             tqdm_write("ERROR (extract_target_logprobs): '.token_logprobs' attribute is None.")
+             logging.error("ERROR (extract_target_logprobs): '.token_logprobs' attribute is None.")
              return None
         if not isinstance(all_token_logprobs, list):
-             tqdm_write(f"ERROR (extract_target_logprobs): '.token_logprobs' is not a list (type: {type(all_token_logprobs)}).")
+             logging.error(f"ERROR (extract_target_logprobs): '.token_logprobs' is not a list (type: {type(all_token_logprobs)}).")
              return None
         # Check if the list actually contains numbers
         if all_token_logprobs and not all(isinstance(lp, (float, int)) for lp in all_token_logprobs):
-             tqdm_write(f"ERROR (extract_target_logprobs): '.token_logprobs' list contains non-numeric values. Example: {all_token_logprobs[:5]}")
+             logging.error(f"ERROR (extract_target_logprobs): '.token_logprobs' list contains non-numeric values. Example: {all_token_logprobs[:5]}")
              return None
 
         # Calculate the number of tokens in the context (using the same logic as get_logprobs_for_text)
@@ -407,12 +409,12 @@ def extract_target_logprobs(
             context_tokens = encoder.encode(context_with_sep) if context_with_sep else []
             n_ctx = len(context_tokens)
         except Exception as enc_e:
-            tqdm_write(f"ERROR (extract_target_logprobs): Tiktoken encoding failed for context: {enc_e}")
+            logging.error(f"ERROR (extract_target_logprobs): Tiktoken encoding failed for context: {enc_e}")
             return None
 
         # --- Token Alignment Check (crucial step) ---
         if len(all_token_logprobs) <= n_ctx:
-             tqdm_write(f"Warning (extract_target_logprobs): Number of logprobs ({len(all_token_logprobs)}) "
+             logging.warning(f"Warning (extract_target_logprobs): Number of logprobs ({len(all_token_logprobs)}) "
                         f"not greater than calculated context tokens ({n_ctx}). "
                         f"Cannot reliably extract target logprobs via slicing.")
              # Fallback: Use the known target text length for estimation
@@ -420,17 +422,17 @@ def extract_target_logprobs(
                  target_tokens_estimated = encoder.encode(text_to_score)
                  n_target_estimated = len(target_tokens_estimated)
                  if len(all_token_logprobs) >= n_target_estimated and n_target_estimated > 0:
-                     tqdm_write(f"Attempting fallback: Using last {n_target_estimated} logprobs based on target text encoding.")
+                     logging.warning(f"Attempting fallback: Using last {n_target_estimated} logprobs based on target text encoding.")
                      target_lps = all_token_logprobs[-n_target_estimated:]
                      if not all(isinstance(lp, (float, int)) for lp in target_lps):
-                          tqdm_write("ERROR (extract_target_logprobs): Fallback failed - Extracted logprobs are not numeric.")
+                          logging.error("ERROR (extract_target_logprobs): Fallback failed - Extracted logprobs are not numeric.")
                           return None
                      return [float(lp) for lp in target_lps] # Ensure float
                  else:
-                     tqdm_write("Fallback failed (length mismatch or zero target tokens). Returning None.")
+                     logging.warning("Fallback failed (length mismatch or zero target tokens). Returning None.")
                      return None
              except Exception as enc_e2:
-                 tqdm_write(f"ERROR (extract_target_logprobs): Tiktoken encoding failed for fallback target text: {enc_e2}")
+                 logging.error(f"ERROR (extract_target_logprobs): Tiktoken encoding failed for fallback target text: {enc_e2}")
                  return None
 
         # Standard extraction: Slice based on context token count
@@ -443,26 +445,25 @@ def extract_target_logprobs(
             n_target_extracted = len(target_lps)
 
             if n_target_extracted != n_target_expected:
-                tqdm_write(f"Warning (extract_target_logprobs): Mismatch in expected ({n_target_expected}) "
+                logging.warning(f"Warning (extract_target_logprobs): Mismatch in expected ({n_target_expected}) "
                            f"and extracted ({n_target_extracted}) target token counts via slicing. "
                            f"Using extracted {n_target_extracted} tokens.")
         except Exception as enc_e3:
-             tqdm_write(f"Warning (extract_target_logprobs): Tiktoken encoding failed for target text sanity check: {enc_e3}. Skipping check.")
+             logging.warning(f"Warning (extract_target_logprobs): Tiktoken encoding failed for target text sanity check: {enc_e3}. Skipping check.")
 
         if not target_lps:
-             tqdm_write("Warning (extract_target_logprobs): Extracted target logprobs list is empty after slicing (but context length check passed?).")
+             logging.warning("Warning (extract_target_logprobs): Extracted target logprobs list is empty after slicing (but context length check passed?).")
              return [] # Return empty list if slicing resulted in nothing
 
         # Final check: Ensure extracted logprobs are numeric
         if not all(isinstance(lp, (float, int)) for lp in target_lps):
-             tqdm_write(f"ERROR (extract_target_logprobs): Extracted target logprobs are not numeric after slicing. Example: {target_lps[:5]}")
+             logging.error(f"ERROR (extract_target_logprobs): Extracted target logprobs are not numeric after slicing. Example: {target_lps[:5]}")
              return None
 
         return [float(lp) for lp in target_lps] # Ensure float
 
     except Exception as e:
-        tqdm_write(f"ERROR (extract_target_logprobs) during logprob extraction: {type(e).__name__}: {e}")
-        traceback.print_exc()
+        logging.error(f"ERROR (extract_target_logprobs) during logprob extraction: {type(e).__name__}: {e}", exc_info=True) # Use exc_info=True
         return None
 
 def features_from_logprobs(
@@ -480,7 +481,7 @@ def features_from_logprobs(
         Dictionary of features, or None if input is invalid.
     """
     if not lps or not all(isinstance(lp, (float, int)) for lp in lps):
-        # tqdm_write(f"Warning (features_from_logprobs): Input logprobs list is empty or contains non-numeric values.")
+        # logging.warning(f"Warning (features_from_logprobs): Input logprobs list is empty or contains non-numeric values.")
         # Return None only if truly invalid, allow empty list to return zero/NaN metrics
         if not lps:
             return {
@@ -492,7 +493,7 @@ def features_from_logprobs(
                 "peak_win": float('nan'),
             }
         elif not all(isinstance(lp, (float, int)) for lp in lps):
-             tqdm_write(f"ERROR (features_from_logprobs): Input logprobs list contains non-numeric values.")
+             logging.error(f"ERROR (features_from_logprobs): Input logprobs list contains non-numeric values.")
              return None # Non-numeric is an error
 
     # Ensure all inputs to numpy/math functions are floats
@@ -520,7 +521,7 @@ def features_from_logprobs(
                 peak_window = float(np.max(win_avg))
             # else: peak_window remains average surprisal
         except Exception as e:
-             tqdm_write(f"Warning (features_from_logprobs): numpy.convolve failed: {e}. Using overall mean surprisal for peak_window.")
+             logging.warning(f"Warning (features_from_logprobs): numpy.convolve failed: {e}. Using overall mean surprisal for peak_window.")
     elif N > 0 and N < window:
         # If N < window, peak window is just the max surprisal over the short sequence
         # We already calculated average surprisal as default, maybe max is better?
@@ -538,7 +539,7 @@ def features_from_logprobs(
         except OverflowError:
             ppl = float('inf')
         except Exception as e:
-            tqdm_write(f"Warning (features_from_logprobs): math.exp calculation failed for perplexity: {e}")
+            logging.warning(f"Warning (features_from_logprobs): math.exp calculation failed for perplexity: {e}")
             # ppl remains float('nan')
 
     return {
