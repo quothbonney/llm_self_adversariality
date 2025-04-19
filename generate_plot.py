@@ -51,13 +51,19 @@ def process_belief_data(belief_data: Optional[Dict[str, Any]], run_name: str = "
         data = belief_data.get(key_str)
         if not data: continue
 
-        # --- Access data within belief_logits --- 
+        # --- Access data within belief_logits ---
         belief_logits = data.get('belief_logits', {}) # Get the sub-dictionary
 
-        generated = belief_logits.get('Generated')
-        true_lp = belief_logits.get('True_Logprob')
-        false_lp = belief_logits.get('False_Logprob')
-        # --- End access modification ---
+        # ---> ADDED CHECK: Handle case where belief_logits key exists but is null/None
+        if belief_logits is None:
+            generated = None
+            true_lp = None
+            false_lp = None
+        else:
+            generated = belief_logits.get('Generated')
+            true_lp = belief_logits.get('True_Logprob')
+            false_lp = belief_logits.get('False_Logprob')
+        # --- End access modification & ADDED CHECK ---
 
         try: true_lp = float(true_lp) if true_lp is not None else None
         except (ValueError, TypeError): true_lp = None
@@ -287,7 +293,7 @@ def plot_belief_analysis(
     grid_points_bs = np.linspace(y_min_bs, y_max_bs, 200) # Grid for evaluation
 
     plot_relative_kde(final_step_data['clean']['belief_score'], ax_m_bs, color_clean, grid_points_bs, bw_adjust=1.0, plot_args=manual_plot_args)
-    plot_relative_kde(final_step_data['poisoned']['belief_score'], ax_m_bs, color_poisoned, grid_points_bs, bw_adjust=0.1, plot_args=manual_plot_args)
+    plot_relative_kde(final_step_data['poisoned']['belief_score'], ax_m_bs, color_poisoned, grid_points_bs, bw_adjust=0.4, plot_args=manual_plot_args)
     print(final_step_data['poisoned']['belief_score'])
 
     # --- Panel 2 Marginals (P(Generated)) ---

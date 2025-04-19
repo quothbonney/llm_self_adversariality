@@ -7,6 +7,9 @@ import traceback
 import tiktoken # Keep for potential type hints elsewhere if needed, or remove if unused
 import logging # Added logging
 
+# Get the named logger
+logger = logging.getLogger('experiment_logger')
+
 DEFAULT_MODEL_ID = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
 # TOKENIZER = "llama3.1" # Comment out or remove, as we now use the custom one implicitly
 # Use tqdm for progress bars if available (for logging within helpers)
@@ -25,7 +28,7 @@ try:
     # Ensure 'tokenizer.model' is accessible from where this script runs
     enc = tiktoken.get_encoding("cl100k_base")
 except Exception as e:
-    logging.error(f"ERROR: Unexpected error initializing custom Tokenizer: {e}") # Use logging
+    logger.error(f"ERROR: Unexpected error initializing custom Tokenizer: {e}") # Use logger
     raise
 # --- End Tokenizer Initialization ---
 
@@ -44,7 +47,7 @@ def get_llm_response(
 ):
     """Gets a response from the LLM, optionally requesting logprobs."""
     if not client:
-        logging.error("ERROR (get_llm_response): Invalid client.") # Use logging
+        logger.error("ERROR (get_llm_response): Invalid client.") # Use logger
         return None
 
     api_params = {
@@ -58,12 +61,12 @@ def get_llm_response(
         api_params["logprobs"] = logprobs
 
     if verbose_debug and logprobs is not None:
-        logging.debug(f"DEBUG (get_llm_response): Sending API request with logprobs={logprobs}") # Use logging
+        logger.debug(f"DEBUG (get_llm_response): Sending API request with logprobs={logprobs}") # Use logger
 
     try:
         return client.chat.completions.create(**api_params)
     except Exception as e:
-        logging.error(f"ERROR (get_llm_response) during API call: {e}") # Use logging
+        logger.error(f"ERROR (get_llm_response) during API call: {e}", exc_info=True) # Use logger with exc_info
         return None
 
 
@@ -90,7 +93,7 @@ def get_belief_logits(
       }
     """
     if not client:
-        logging.error("ERROR (get_belief_logits): Invalid client.") # Use logging
+        logger.error("ERROR (get_belief_logits): Invalid client.") # Use logger
         return {"Generated": None, "True_Logprob": None, "False_Logprob": None}
 
     prompt = (
@@ -101,7 +104,7 @@ def get_belief_logits(
     msgs = current_history + [{"role": "user", "content": prompt}]
 
     if verbose:
-        logging.info(f"--- Querying belief (single‑call) ---\n Prompt: '{belief_query}'") # Use logging
+        logger.info(f"--- Querying belief (single‑call) ---\n Prompt: '{belief_query}'") # Use logger
 
     # ─── Single API call ────────────────────────────────────────────────────────
     resp = get_llm_response(
@@ -115,7 +118,7 @@ def get_belief_logits(
     )
     if not resp or not resp.choices:
         if verbose:
-            logging.error("ERROR (get_belief_logits): No response or empty choices.") # Use logging
+            logger.error("ERROR (get_belief_logits): No response or empty choices.") # Use logger
         return {"Generated": None, "True_Logprob": None, "False_Logprob": None}
 
     choice = resp.choices[0]
@@ -137,7 +140,7 @@ def get_belief_logits(
         generated = false_token_str
 
     if verbose:
-        logging.info( # Use logging
+        logger.info( # Use logger
             f"Extraction Result: Generated='{generated}', "
             f"True Logprob={t_lp:.6f}, False Logprob={f_lp:.6f}"
         )
@@ -167,7 +170,7 @@ def generate_poison_step(
     if not client:
         return None
     if verbose:
-        logging.info(f"--- Generating poison content for Step {step_n} ---") # Use logging
+        logger.info(f"--- Generating poison content for Step {step_n} ---") # Use logger
 
     messages_for_poison = [
         {"role": "system",  "content": misaligned_persona_prompt},
@@ -198,11 +201,11 @@ def generate_poison_step(
             or "apologize" in content.lower()
             or "cannot fulfill" in content.lower()
         ):
-            logging.warning(f"WARNING (generate_poison_step): unusable content:\n{content}") # Use logging
+            logger.warning(f"WARNING (generate_poison_step): unusable content:\n{content}") # Use logger
             return None
         return content
 
-    logging.warning("WARNING (generate_poison_step): No content returned.") # Use logging
+    logger.warning("WARNING (generate_poison_step): No content returned.") # Use logger
     return None
 
 
@@ -235,7 +238,7 @@ def run_reasoning_chain(
         simulated = f"Simulated reasoning content for step {step}."
         msgs.append({"role": "assistant", "content": f"Step {step}: {simulated}"})
     if verbose:
-        logging.info(f"(Ran dummy preliminary chain for {max_steps} steps)") # Use logging
+        logger.info(f"(Ran dummy preliminary chain for {max_steps} steps)") # Use logger
     return msgs
 
 # -----------------------------------------------------------------------------
@@ -267,7 +270,7 @@ def get_logprobs_for_text(
         The raw API response object containing logprobs, or None if fails.
     """
     if not client:
-        logging.error("ERROR (get_logprobs_for_text): Invalid client.")
+        logger.error("ERROR (get_logprobs_for_text): Invalid client.") # Use logger
         return None
 
     # Ensure context ends with a newline for more consistent tokenization splitting
@@ -280,7 +283,7 @@ def get_logprobs_for_text(
 
     # Handle potential empty text_to_score gracefully
     if not text_to_score:
-        logging.warning("Warning (get_logprobs_for_text): text_to_score is empty. Cannot get logprobs.")
+        logger.warning("Warning (get_logprobs_for_text): text_to_score is empty. Cannot get logprobs.") # Use logger
         return None
 
     full_prompt = context_with_sep + text_to_score
@@ -313,40 +316,40 @@ def get_logprobs_for_text(
                     if isinstance(logprobs_part.token_logprobs, list):
                          valid_structure_found = True
                     else:
-                        logging.warning(f"Warning (get_logprobs_for_text): '.token_logprobs' is not a list (type: {type(logprobs_part.token_logprobs)}).")
+                        logger.warning(f"Warning (get_logprobs_for_text): '.token_logprobs' is not a list (type: {type(logprobs_part.token_logprobs)}).") # Use logger
                 # Add elif for other structures if needed
 
             if valid_structure_found:
                  return response # Return the successful response object
             else:
-                 logging.warning(f"Warning (get_logprobs_for_text): API response missing expected logprobs structure "+
+                 logger.warning(f"Warning (get_logprobs_for_text): API response missing expected logprobs structure "+
                            f"(checked for .token_logprobs list). Attempt {attempt+1}/{max_retries+1}")
                  if attempt == max_retries:
-                     logging.error("ERROR (get_logprobs_for_text): Invalid logprobs structure after retries.")
+                     logger.error("ERROR (get_logprobs_for_text): Invalid logprobs structure after retries.") # Use logger
                      # Optionally log response structure for debugging
                      try:
-                        logging.debug(f"DEBUG: Last raw response obj: {response}")
+                        logger.debug(f"DEBUG: Last raw response obj: {response}") # Use logger
                      except Exception:
-                         logging.error("DEBUG: Could not serialize response obj for logging.")
+                         logger.error("DEBUG: Could not serialize response obj for logging.") # Use logger
                      return None
 
         except AttributeError as ae:
-             logging.error(f"ERROR (get_logprobs_for_text) AttributeError: {ae}. Likely missing expected structure. "
+             logger.error(f"ERROR (get_logprobs_for_text) AttributeError: {ae}. Likely missing expected structure. "
                         f"Attempt {attempt+1}/{max_retries+1}", exc_info=True) # Use exc_info=True
 
         except Exception as e:
-            logging.error(f"ERROR (get_logprobs_for_text) API call failed: {type(e).__name__}: {e}. Attempt {attempt+1}/{max_retries+1}")
+            logger.error(f"ERROR (get_logprobs_for_text) API call failed: {type(e).__name__}: {e}. Attempt {attempt+1}/{max_retries+1}") # Use logger
             if attempt == max_retries:
-                logging.error("ERROR (get_logprobs_for_text): Max retries reached.")
+                logger.error("ERROR (get_logprobs_for_text): Max retries reached.") # Use logger
                 return None
 
         # Retry logic
         if attempt < max_retries:
-             logging.debug(f"   Retrying in {delay:.1f} seconds...")
+             logger.debug(f"   Retrying in {delay:.1f} seconds...") # Use logger
              time.sleep(delay)
              delay *= 2
         else:
-            logging.error("ERROR (get_logprobs_for_text): Failed to get valid logprobs response after all retries.")
+            logger.error("ERROR (get_logprobs_for_text): Failed to get valid logprobs response after all retries.") # Use logger
             return None
 
     return None # Should be unreachable
@@ -371,30 +374,30 @@ def extract_target_logprobs(
         A list of log probabilities for the tokens in text_to_score, or None on error.
     """
     if not encoder:
-        logging.error("ERROR (extract_target_logprobs): Invalid custom tokenizer provided.") # Updated message
+        logger.error("ERROR (extract_target_logprobs): Invalid custom tokenizer provided.") # Use logger
         return None
     if not text_to_score: # Handle empty target text
-        logging.warning("Warning (extract_target_logprobs): text_to_score is empty. Returning empty list.")
+        logger.warning("Warning (extract_target_logprobs): text_to_score is empty. Returning empty list.") # Use logger
         return []
 
     try:
         # Access logprobs using the assumed structure
         if not (api_response and api_response.choices and api_response.choices[0].logprobs and
                 hasattr(api_response.choices[0].logprobs, 'token_logprobs')):
-            logging.error("ERROR (extract_target_logprobs): API response missing expected logprobs structure (.token_logprobs).")
+            logger.error("ERROR (extract_target_logprobs): API response missing expected logprobs structure (.token_logprobs).") # Use logger
             return None
 
         all_token_logprobs = api_response.choices[0].logprobs.token_logprobs
 
         if all_token_logprobs is None:
-             logging.error("ERROR (extract_target_logprobs): '.token_logprobs' attribute is None.")
+             logger.error("ERROR (extract_target_logprobs): '.token_logprobs' attribute is None.") # Use logger
              return None
         if not isinstance(all_token_logprobs, list):
-             logging.error(f"ERROR (extract_target_logprobs): '.token_logprobs' is not a list (type: {type(all_token_logprobs)}).")
+             logger.error(f"ERROR (extract_target_logprobs): '.token_logprobs' is not a list (type: {type(all_token_logprobs)}).") # Use logger
              return None
         # Check if the list actually contains numbers
         if all_token_logprobs and not all(isinstance(lp, (float, int)) for lp in all_token_logprobs):
-             logging.error(f"ERROR (extract_target_logprobs): '.token_logprobs' list contains non-numeric values. Example: {all_token_logprobs[:5]}")
+             logger.error(f"ERROR (extract_target_logprobs): '.token_logprobs' list contains non-numeric values. Example: {all_token_logprobs[:5]}") # Use logger
              return None
 
         # Calculate the number of tokens in the context (using the same logic as get_logprobs_for_text)
@@ -409,12 +412,12 @@ def extract_target_logprobs(
             context_tokens = encoder.encode(context_with_sep) if context_with_sep else []
             n_ctx = len(context_tokens)
         except Exception as enc_e:
-            logging.error(f"ERROR (extract_target_logprobs): Tiktoken encoding failed for context: {enc_e}")
+            logger.error(f"ERROR (extract_target_logprobs): Tiktoken encoding failed for context: {enc_e}") # Use logger
             return None
 
         # --- Token Alignment Check (crucial step) ---
         if len(all_token_logprobs) <= n_ctx:
-             logging.warning(f"Warning (extract_target_logprobs): Number of logprobs ({len(all_token_logprobs)}) "
+             logger.warning(f"Warning (extract_target_logprobs): Number of logprobs ({len(all_token_logprobs)}) "
                         f"not greater than calculated context tokens ({n_ctx}). "
                         f"Cannot reliably extract target logprobs via slicing.")
              # Fallback: Use the known target text length for estimation
@@ -422,17 +425,17 @@ def extract_target_logprobs(
                  target_tokens_estimated = encoder.encode(text_to_score)
                  n_target_estimated = len(target_tokens_estimated)
                  if len(all_token_logprobs) >= n_target_estimated and n_target_estimated > 0:
-                     logging.warning(f"Attempting fallback: Using last {n_target_estimated} logprobs based on target text encoding.")
+                     logger.warning(f"Attempting fallback: Using last {n_target_estimated} logprobs based on target text encoding.") # Use logger
                      target_lps = all_token_logprobs[-n_target_estimated:]
                      if not all(isinstance(lp, (float, int)) for lp in target_lps):
-                          logging.error("ERROR (extract_target_logprobs): Fallback failed - Extracted logprobs are not numeric.")
+                          logger.error("ERROR (extract_target_logprobs): Fallback failed - Extracted logprobs are not numeric.") # Use logger
                           return None
                      return [float(lp) for lp in target_lps] # Ensure float
                  else:
-                     logging.warning("Fallback failed (length mismatch or zero target tokens). Returning None.")
+                     logger.warning("Fallback failed (length mismatch or zero target tokens). Returning None.") # Use logger
                      return None
              except Exception as enc_e2:
-                 logging.error(f"ERROR (extract_target_logprobs): Tiktoken encoding failed for fallback target text: {enc_e2}")
+                 logger.error(f"ERROR (extract_target_logprobs): Tiktoken encoding failed for fallback target text: {enc_e2}") # Use logger
                  return None
 
         # Standard extraction: Slice based on context token count
@@ -445,25 +448,25 @@ def extract_target_logprobs(
             n_target_extracted = len(target_lps)
 
             if n_target_extracted != n_target_expected:
-                logging.warning(f"Warning (extract_target_logprobs): Mismatch in expected ({n_target_expected}) "
+                logger.warning(f"Warning (extract_target_logprobs): Mismatch in expected ({n_target_expected}) "
                            f"and extracted ({n_target_extracted}) target token counts via slicing. "
                            f"Using extracted {n_target_extracted} tokens.")
         except Exception as enc_e3:
-             logging.warning(f"Warning (extract_target_logprobs): Tiktoken encoding failed for target text sanity check: {enc_e3}. Skipping check.")
+             logger.warning(f"Warning (extract_target_logprobs): Tiktoken encoding failed for target text sanity check: {enc_e3}. Skipping check.") # Use logger
 
         if not target_lps:
-             logging.warning("Warning (extract_target_logprobs): Extracted target logprobs list is empty after slicing (but context length check passed?).")
+             logger.warning("Warning (extract_target_logprobs): Extracted target logprobs list is empty after slicing (but context length check passed?).") # Use logger
              return [] # Return empty list if slicing resulted in nothing
 
         # Final check: Ensure extracted logprobs are numeric
         if not all(isinstance(lp, (float, int)) for lp in target_lps):
-             logging.error(f"ERROR (extract_target_logprobs): Extracted target logprobs are not numeric after slicing. Example: {target_lps[:5]}")
+             logger.error(f"ERROR (extract_target_logprobs): Extracted target logprobs are not numeric after slicing. Example: {target_lps[:5]}") # Use logger
              return None
 
         return [float(lp) for lp in target_lps] # Ensure float
 
     except Exception as e:
-        logging.error(f"ERROR (extract_target_logprobs) during logprob extraction: {type(e).__name__}: {e}", exc_info=True) # Use exc_info=True
+        logger.error(f"ERROR (extract_target_logprobs) during logprob extraction: {type(e).__name__}: {e}", exc_info=True) # Use exc_info=True
         return None
 
 def features_from_logprobs(
@@ -493,7 +496,7 @@ def features_from_logprobs(
                 "peak_win": float('nan'),
             }
         elif not all(isinstance(lp, (float, int)) for lp in lps):
-             logging.error(f"ERROR (features_from_logprobs): Input logprobs list contains non-numeric values.")
+             logger.error(f"ERROR (features_from_logprobs): Input logprobs list contains non-numeric values.") # Use logger
              return None # Non-numeric is an error
 
     # Ensure all inputs to numpy/math functions are floats
@@ -521,7 +524,7 @@ def features_from_logprobs(
                 peak_window = float(np.max(win_avg))
             # else: peak_window remains average surprisal
         except Exception as e:
-             logging.warning(f"Warning (features_from_logprobs): numpy.convolve failed: {e}. Using overall mean surprisal for peak_window.")
+             logger.warning(f"Warning (features_from_logprobs): numpy.convolve failed: {e}. Using overall mean surprisal for peak_window.") # Use logger
     elif N > 0 and N < window:
         # If N < window, peak window is just the max surprisal over the short sequence
         # We already calculated average surprisal as default, maybe max is better?
@@ -539,7 +542,7 @@ def features_from_logprobs(
         except OverflowError:
             ppl = float('inf')
         except Exception as e:
-            logging.warning(f"Warning (features_from_logprobs): math.exp calculation failed for perplexity: {e}")
+            logger.warning(f"Warning (features_from_logprobs): math.exp calculation failed for perplexity: {e}") # Use logger
             # ppl remains float('nan')
 
     return {

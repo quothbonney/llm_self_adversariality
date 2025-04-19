@@ -9,8 +9,12 @@ from typing import List, Dict, Optional, Tuple, Any # Added Typing
 import logging # Added logging
 import threading # Added threading
 
+# Get the named logger
+logger = logging.getLogger('experiment_logger')
+
 DEFAULT_MODEL_ID = "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
 MAX_STEP_RETRIES = 3 # Maximum retries for a single step generation if confusion is detected
+MAX_METRICS_RETRIES = 5 # Maximum retries for metric calculation on poison steps
 
 # Remove tqdm imports as verbose=False will be used from main.py, and we use logging now
 # try:
@@ -90,13 +94,13 @@ def run_reasoning_chain_with_belief_probing(
     """
     if not client:
         # Use logging instead of tqdm_write
-        logging.error("ERROR: Invalid client object provided.")
+        logger.error("ERROR: Invalid client object provided.")
         return [], {}
     if not global_encoder:
-        logging.error("ERROR: Tiktoken encoder not available.")
+        logger.error("ERROR: Tiktoken encoder not available.")
         return [], {}
     if metrics_capture_mode not in ['NONE', 'POISON_ONLY', 'ALL']:
-        logging.warning(f"Warning: Invalid metrics_capture_mode '{metrics_capture_mode}'. Defaulting to 'NONE'.")
+        logger.warning(f"Warning: Invalid metrics_capture_mode '{metrics_capture_mode}'. Defaulting to 'NONE'.")
         metrics_capture_mode = 'NONE'
 
     if stop_sequences_step is None:
@@ -117,12 +121,12 @@ def run_reasoning_chain_with_belief_probing(
     # --- End check ---
 
     if verbose:
-        logging.info(f"\nStarting Reasoning Chain (Model: {model_id}, Temp: {temperature})")
+        logger.info(f"\nStarting Reasoning Chain (Model: {model_id}, Temp: {temperature})")
         if poison_indices_set:
-             logging.info(f"-> Dynamic Contextual Poisoning ENABLED: Steps {sorted(list(poison_indices_set))}")
+             logger.info(f"-> Dynamic Contextual Poisoning ENABLED: Steps {sorted(list(poison_indices_set))}")
         else:
-             logging.info("-> Poisoning: None")
-        logging.info(f"-> Generation Metrics Capture Mode: {metrics_capture_mode}")
+             logger.info("-> Poisoning: None")
+        logger.info(f"-> Generation Metrics Capture Mode: {metrics_capture_mode}")
 
     step_iterator = range(1, max_steps + 1)
 
@@ -133,8 +137,10 @@ def run_reasoning_chain_with_belief_probing(
         current_step_content = None
         is_poisoned_this_step = False
         generation_metrics_calculated = None # Store metrics for this step
-        step_status = "Pending" # Initial status
-        final_step_status = "Pending" # Status before potential break
+        step_status = "Pending" # Initial status for generation/poisoning
+        metrics_status = "Not Calculated" # Initial status for metrics
+        probe_status = "Pending" # Initial status for probing
+        final_step_status = "Pending" # Overall status before potential break
 
         # Store context *before* this step's generation for potential metric calculation
         context_before_step = messages[:]
@@ -159,7 +165,7 @@ def run_reasoning_chain_with_belief_probing(
             else: # Poison generation failed
                 current_step_content = fallback_poison_string
                 step_status = "Poison Fallback"
-                if verbose: logging.warning(f"   -> ⚠️ Failed poison gen for Step {step}. Using fallback.")
+                if verbose: logger.warning(f"   -> ⚠️ Failed poison gen for Step {step}. Using fallback.")
 
             # Add the (poisoned or fallback) content to history
             full_step_message = {"role": "assistant", "content": f"Step {step}: {current_step_content}"}
@@ -181,7 +187,7 @@ def run_reasoning_chain_with_belief_probing(
                      last_action = f"Step Gen Retry {retry_count} (Step {step})"
                      # Optional: Add a clarifying message on retry?
                      # current_messages_for_step.insert(-1, {"role": "user", "content": f"Please generate the content for Step {step} based on the history. Focus on the current step."})
-                     logging.warning(f"   -> Retrying Step {step} generation (Attempt {retry_count}/{max_step_retries})...")
+                     logger.warning(f"   -> Retrying Step {step} generation (Attempt {retry_count}/{max_step_retries})...")
 
 
                 response = get_llm_response(
@@ -230,7 +236,7 @@ def run_reasoning_chain_with_belief_probing(
                     # --- End Confusion Detection ---
 
                     if is_confused:
-                        logging.warning(f"   -> ⚠️ Step {step} Confusion Detected (Attempt {retry_count}): {confused_reason}. Content: '{step_content_raw[:100]}...'")
+                        logger.warning(f"   -> ⚠️ Step {step} Confusion Detected (Attempt {retry_count}): {confused_reason}. Content: '{step_content_raw[:100]}...'")
                         retry_count += 1
                         step_status = f"Retry {retry_count-1} Failed"
                         time.sleep(0.5) # Small delay before retry
@@ -243,7 +249,7 @@ def run_reasoning_chain_with_belief_probing(
                     break # Exit the retry loop
 
                 else: # API call failed or returned no choices
-                    logging.warning(f"   -> ⚠️ API call failed or no choices returned for Step {step} (Attempt {retry_count}).")
+                    logger.warning(f"   -> ⚠️ API call failed or no choices returned for Step {step} (Attempt {retry_count}).")
                     retry_count += 1
                     step_status = f"Retry {retry_count-1} Failed (API Error)"
                     time.sleep(1.0) # Longer delay for API errors
@@ -252,7 +258,7 @@ def run_reasoning_chain_with_belief_probing(
             # --- After Retry Loop ---
             if not generation_successful:
                 step_status = "Failed Retries"
-                logging.error(f"\n❌ ERROR: Step {step} failed generation after {max_step_retries} retries due to persistent confusion or API errors.")
+                logger.error(f"\n❌ ERROR: Step {step} failed generation after {max_step_retries} retries due to persistent confusion or API errors.")
                 chain_stopped_early_reason = f"Step {step}: Failed after {max_step_retries} retries ({step_status})"
                 # Add a placeholder message to history indicating failure? Optional.
                 # messages.append({"role": "assistant", "content": f"Step {step}: [Generation failed after retries]"})
@@ -265,11 +271,15 @@ def run_reasoning_chain_with_belief_probing(
             # Check for premature final answer after successful generation
             if "final answer" in current_step_content.lower():
                 step_status = "Premature Final Ans"
-                if verbose: logging.warning(f"\n⚠️ WARNING: Model attempted premature final answer at step {step}. Stopping after belief probe.")
+                if verbose: logger.warning(f"\n⚠️ WARNING: Model attempted premature final answer at step {step}. Stopping after belief probe.")
                 # Probe belief then break outer loop below (handled by loop structure)
 
 
         # --- Generation Metrics Calculation (Common to both poisoned and regular steps if enabled) ---
+        # Reset metrics for this step before potential calculation
+        generation_metrics_calculated = None
+        metrics_status = "Not Calculated"
+
         should_calculate_metrics = (
             metrics_capture_mode == 'ALL' or
             (metrics_capture_mode == 'POISON_ONLY' and is_poisoned_this_step)
@@ -277,58 +287,99 @@ def run_reasoning_chain_with_belief_probing(
 
         if should_calculate_metrics and current_step_content is not None:
             last_action = f"Metrics Calc (Step {step})"
-            metrics_status = "Calculating"
-            if verbose_metrics_calc:
-                 logging.info(f"   Calculating metrics for generated content (Step {step})...")
+            metrics_status = "Pending" # Reset status for calculation attempt(s)
 
-            # 1. Prepare context string from history *before* the current step
-            context_str = "\n".join([f"{m['role']}: {m['content']}" for m in context_before_step])
-            text_to_score = current_step_content # The actual generated content for this step
+            metrics_retry_count = 0
+            max_retries_for_this_step = MAX_METRICS_RETRIES if is_poisoned_this_step else 0 # Only retry for poison steps
 
-            # 2. Get logprobs via API
-            logprobs_response = get_logprobs_for_text(
-                client=client,
-                model_id=model_id,
-                context=context_str,
-                text_to_score=text_to_score
-            )
-            metrics_status = "API Done"
+            while metrics_retry_count <= max_retries_for_this_step:
+                if metrics_retry_count > 0:
+                    logger.warning(f"   -> Retrying Metrics Calculation for Poison Step {step} (Attempt {metrics_retry_count}/{max_retries_for_this_step})...")
+                    time.sleep(1.0 * (metrics_retry_count)) # Exponential backoff maybe? Or just linear delay
 
-            if logprobs_response:
-                metrics_status = "Extracting LPs"
-                # 3. Extract target logprobs
-                target_lps = extract_target_logprobs(
-                    api_response=logprobs_response,
+                # --- Start Metrics Calculation Attempt ---
+                current_attempt_metrics = None # Reset for this attempt
+                current_attempt_status = "Calculating"
+
+                if verbose_metrics_calc:
+                    log_prefix = f"(Attempt {metrics_retry_count}) " if metrics_retry_count > 0 else ""
+                    logger.info(f"   {log_prefix}Calculating metrics for generated content (Step {step})...")
+
+                context_str = "\n".join([f"{m['role']}: {m['content']}" for m in context_before_step])
+                text_to_score = current_step_content
+
+                logprobs_response = get_logprobs_for_text(
+                    client=client,
+                    model_id=model_id,
                     context=context_str,
-                    text_to_score=text_to_score,
-                    encoder=global_encoder # Use the globally loaded encoder
+                    text_to_score=text_to_score
                 )
+                current_attempt_status = "API Done"
 
-                if target_lps is not None: # Allow empty list from extract_target_logprobs
-                    metrics_status = "Calculating Feats"
-                    # 4. Calculate features
-                    generation_metrics_calculated = features_from_logprobs(target_lps)
-                    if generation_metrics_calculated:
-                         metrics_status = "Metrics OK"
-                         if verbose_metrics_calc:
-                             ppl = generation_metrics_calculated.get('ppl', float('nan'))
-                             avg_lp = generation_metrics_calculated.get('avg_lp', float('nan'))
-                             var_surp = generation_metrics_calculated.get('var_surp', float('nan'))
-                             logging.info(f"     -> Metrics OK: PPL={ppl:.2f}, "
-                                        f"AvgLP={avg_lp:.4f}, "
-                                        f"VarSurp={var_surp:.3f}")
+                if logprobs_response:
+                    current_attempt_status = "Extracting LPs"
+                    target_lps = extract_target_logprobs(
+                        api_response=logprobs_response,
+                        context=context_str,
+                        text_to_score=text_to_score,
+                        encoder=global_encoder
+                    )
+
+                    if target_lps is not None:
+                        current_attempt_status = "Calculating Feats"
+                        current_attempt_metrics = features_from_logprobs(target_lps)
+                        if current_attempt_metrics:
+                            current_attempt_status = "Metrics OK"
+                            if verbose_metrics_calc:
+                                ppl = current_attempt_metrics.get('ppl', float('nan'))
+                                avg_lp = current_attempt_metrics.get('avg_lp', float('nan'))
+                                var_surp = current_attempt_metrics.get('var_surp', float('nan'))
+                                logger.info(f"     -> Attempt {metrics_retry_count} Metrics OK: PPL={ppl:.2f}, AvgLP={avg_lp:.4f}, VarSurp={var_surp:.3f}")
+                        else:
+                            current_attempt_status = "Metrics Fail (Features)"
+                            if verbose_metrics_calc: logger.warning(f"     -> Attempt {metrics_retry_count} Metrics Failed (features_from_logprobs returned None).")
                     else:
-                        metrics_status = "Metrics Fail (Features)"
-                        if verbose_metrics_calc: logging.warning("     -> Metrics Calculation Failed (features_from_logprobs returned None).")
+                        current_attempt_status = "Metrics Fail (Extract)"
+                        if verbose_metrics_calc: logger.warning(f"     -> Attempt {metrics_retry_count} Metrics Failed (extract_target_logprobs returned None).")
                 else:
-                    metrics_status = "Metrics Fail (Extract)"
-                    if verbose_metrics_calc: logging.warning("     -> Metrics Calculation Failed (extract_target_logprobs returned None).")
-            else:
-                metrics_status = "Metrics Fail (API)"
-                if verbose_metrics_calc: logging.warning("     -> Metrics Calculation Failed (get_logprobs_for_text returned None).")
+                    current_attempt_status = "Metrics Fail (API)"
+                    if verbose_metrics_calc: logger.warning(f"     -> Attempt {metrics_retry_count} Metrics Failed (get_logprobs_for_text returned None).")
+
+                # --- Check if attempt succeeded ---
+                if current_attempt_metrics is not None:
+                    generation_metrics_calculated = current_attempt_metrics # Store successful result
+                    metrics_status = current_attempt_status # Store "Metrics OK"
+                    break # Exit retry loop on success
+
+                # --- If attempt failed ---
+                metrics_status = current_attempt_status # Update status to reflect the failure type
+                metrics_retry_count += 1
+                # Loop continues if retries remain for poison step
+
+            # --- After Metrics Retry Loop ---
+            if generation_metrics_calculated is None:
+                # This means either:
+                # 1. It wasn't a poison step and the first attempt failed.
+                # 2. It WAS a poison step and ALL retries failed.
+                if is_poisoned_this_step:
+                    # Log the persistent failure for the poisoned step as an ERROR
+                    logger.error(f"❌ ERROR: Failed to calculate metrics for POISONED Step {step} after {max_retries_for_this_step} retries. Last status: {metrics_status}. Run WILL CONTINUE without these metrics.")
+                    # SET step_status or metrics_status here? Let's keep metrics_status as the failure reason.
+                    # We no longer treat this as critical enough to stop the run.
+                    # step_status = "Metrics Failed (Poison Retries)" # No - keep original generation status
+                    # chain_stopped_early_reason = f"Step {step}: Critical metrics failure on poison step after {max_retries_for_this_step} retries ({metrics_status})"
+                    # break # <--- REMOVE THIS BREAK
+                else:
+                    # Non-poison step failed metrics (no retries attempted or needed)
+                    if verbose_metrics_calc or metrics_capture_mode == 'ALL': # Log warning if we expected metrics
+                        logger.warning(f"   -> Metrics calculation failed for non-poison Step {step} (Status: {metrics_status}). Proceeding without metrics.")
+                    # metrics_status already holds the failure reason from the single attempt
+            # else: Metrics were successfully calculated (either on first try or after retries for poison step)
+
 
         # --- Belief Probing (Common to both poisoned and regular steps) ---
-        # Only probe if content was successfully generated or poison fallback was used
+        # Only probe if content was successfully generated/poisoned (and metrics didn't cause critical failure)
+        # The check for critical failure is now removed, so we just check if content exists.
         if current_step_content is not None:
             last_action = f"Belief Probe (Post Step {step})"
             probe_status="Probing"
@@ -339,21 +390,29 @@ def run_reasoning_chain_with_belief_probing(
                 model_id=model_id,
                 verbose=False # Keep belief probe itself quiet
             )
-            probe_status = "Probe OK"
+            if logits_result:
+                probe_status = "Probe OK"
+            else:
+                probe_status = "Probe Fail"
+                logger.warning(f"   -> Belief probe failed for Step {step}.")
 
             # --- Store Data for this Step ---
+            # Use the generation/poisoning status
+            # No longer need to check for the removed critical metrics failure status
             step_data[step] = {
                 "belief_logits": logits_result,
                 "is_poisoned": is_poisoned_this_step,
                 "generation_metrics": generation_metrics_calculated, # Will be None if not calculated or failed
-                "status": step_status # Store the final status of the step generation/poisoning
+                "status": step_status, # Store generation/poison status
+                "metrics_status": metrics_status, # Store detailed status of metrics calculation
+                "probe_status": probe_status    # Store status of belief probe
             }
             # --- End Storing Data ---
 
-            actual_completed_steps = step # Mark step as successfully processed
-            final_step_status = step_status # Record status before potential break
+            actual_completed_steps = step # Mark step as successfully processed (up to belief probe)
+            # final_step_status = step_status # Record status before potential break << This is now captured in step_data
 
-            # --- Update shared progress dictionary --- 
+            # --- Update shared progress dictionary ---
             if progress_tracking_enabled:
                 try:
                     with progress_lock: # type: ignore
@@ -367,26 +426,35 @@ def run_reasoning_chain_with_belief_probing(
                          # --- End update logic ---
                 except Exception as e:
                     # Log error but don't crash the reasoning chain
-                    logging.error(f"[Progress Update Error] Failed for run {experiment_id}: {e}", exc_info=False)
+                    logger.error(f"[Progress Update Error] Failed for run {experiment_id}: {e}", exc_info=False)
             # --- End progress update ---
 
         else:
              # Should only happen if generation failed catastrophically (e.g., max retries exceeded before content assignment)
+             # This path is now less likely because the generation failure break includes storing data.
              probe_status = "Skipped (No Content)"
-             final_step_status = step_status # Record the failure status
-             # Log failure details if not already logged by retry loop
-             if step_status == "Failed Retries" and verbose:
-                 logging.warning(f"\nStopping loop: Step {step} failed after max retries before probe.")
-             elif verbose:
-                 logging.warning(f"\nStopping loop: No content generated or assigned for step {step} (Status: {step_status}). Cannot probe belief.")
+             final_step_status = step_status # Record the generation failure status
+             # Logging for this case might be redundant if generation failure already logged.
+             if verbose:
+                 logger.warning(f"\nSkipping probe for Step {step} due to prior failure (Status: {step_status}).")
+             # Ensure step_data has an entry even in this unlikely scenario
+             if step not in step_data and step_status != "Pending": # Add entry if generation failed but loop didn't break somehow
+                 step_data[step] = {
+                    "belief_logits": None,
+                    "is_poisoned": is_poisoned_this_step,
+                    "generation_metrics": None,
+                    "status": step_status, # Store the failure status
+                    "metrics_status": "Skipped (No Content)",
+                    "probe_status": probe_status
+                 }
              # No need to break here, the break happens within the retry logic if needed
 
         # --- Check if loop should terminate based on status ---
-        if step_status == "Failed Retries":
-            # Already broken inside the retry logic
-            pass
-        elif step_status == "Premature Final Ans":
-             if verbose: logging.info(f"   -> Stopping after Step {step} due to premature final answer.")
+        # Generation failure ('Failed Retries') and critical metrics failure ('Metrics Failed (Poison Retries)')
+        # now break the loop internally.
+        # Check for premature final answer.
+        if step_status == "Premature Final Ans":
+             if verbose: logger.info(f"   -> Stopping after Step {step} due to premature final answer.")
              chain_stopped_early_reason = f"Step {step}: Premature Final Answer"
              break # Stop after probing belief for this step
 
@@ -395,8 +463,10 @@ def run_reasoning_chain_with_belief_probing(
     if verbose:
         # Use the reason if stopped early, otherwise use the final status
         if chain_stopped_early_reason:
-             logging.info(f"\nReasoning chain stopped early. Reason: {chain_stopped_early_reason}")
-        logging.info(f"Reasoning chain finished processing up to step {actual_completed_steps} ({final_message_count} total messages). Max steps requested: {max_steps}.")
+             logger.info(f"\nReasoning chain stopped early. Reason: {chain_stopped_early_reason}")
+        logger.info(f"Reasoning chain finished processing up to step {actual_completed_steps} ({final_message_count} total messages). Max steps requested: {max_steps}.")
+        if actual_completed_steps < max_steps and final_step_status not in ["Premature Final Ans", "Step OK", "Poison OK", "Poison Fallback", "Metrics OK"]:
+            logger.info(f"NOTE: Chain stopped early due to status '{final_step_status}'. Max steps requested: {max_steps}.")
 
     # Return the history and the collected step data (belief + metrics + status)
     return messages, step_data # Return the modified step_data structure
